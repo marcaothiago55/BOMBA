@@ -1,0 +1,212 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <TM1637Display.h>
+#include <Keypad.h>
+
+// Definições das informações do preâmbulo como constantes
+const char* autor   = "Professor Thiago Marcão";
+const char* revisao = "V.0.1";
+const char* data    = "17/08/2024";
+
+// Definições do display OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Definições do display TM1637
+#define CLK A2
+#define DIO A3
+TM1637Display displayTM(CLK, DIO);
+
+// Definição do pino do buzzer
+#define BUZZER_PIN 11
+
+// Variáveis de controle de tempo
+unsigned long previousMillis = 0;
+const long interval = 1; // Intervalo para a contagem regressiva (10ms)
+int countdown = 2000;     // Valor inicial do contador (20 segundos)
+bool paused = false;      // Flag para pausar/retomar a contagem
+bool bombaDesarmada = false; // Variável para controlar se a bomba está desarmada
+
+// Definições do teclado matricial
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1', '2', '3', 'A'},
+  {'4', '5', '6', 'B'},
+  {'7', '8', '9', 'C'},
+  {'*', '0', '#', 'D'}
+};
+byte rowPins[ROWS] = {9, 8, 7, 6};    // Pinos das linhas do teclado
+byte colPins[COLS] = {5, 4, 3, 2};    // Pinos das colunas do teclado
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// Senha correta e controle de entradas
+const char correctPassword[] PROGMEM = "525";
+char inputPassword[4] = "";    // Armazena a senha digitada
+int incorrectAttempts = 0;     // Contador de tentativas incorretas
+
+// Funções auxiliares
+void updateDisplay(int time);
+void handleKeypress(char key);
+void updateBuzzer(int time);
+
+// Função de configuração inicial
+void setup() {
+  // Configuração inicial do display, buzzer e display TM1637
+  displayTM.setBrightness(0x0f);
+  pinMode(BUZZER_PIN, OUTPUT);
+  updateDisplay(countdown);
+  Serial.begin(9600);
+
+  // Inicializa o display OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("Falha ao inicializar o display OLED"));
+    for(;;); // Trava o programa em caso de falha
+  }
+  display.clearDisplay();
+  display.display();
+}
+
+// Função para atualizar o display
+void updateDisplay(int time) {
+  static bool showColon = true; // Variável para controlar a exibição dos dois pontos
+  static unsigned long lastToggle = 0; // Armazena o tempo do último toggle
+
+  int seconds = time / 100;       // Converte o tempo total para segundos
+  int milliseconds = time % 100;  // Obtém os milissegundos restantes
+
+  if (seconds < 0) {
+    seconds = 0;
+    milliseconds = 0;
+  }
+
+  // Alterna a exibição dos dois pontos a cada 500ms
+  if (millis() - lastToggle >= 500) {
+    showColon = !showColon; // Alterna entre mostrar e não mostrar
+    lastToggle = millis();   // Atualiza o tempo do último toggle
+  }
+
+  // Mostra os números e, se necessário, os dois pontos
+  if (showColon) {
+    displayTM.showNumberDecEx(seconds * 100 + milliseconds, 0b10000000, true); // Mostra os dois pontos
+  } else {
+    displayTM.showNumberDecEx(seconds * 100 + milliseconds, 0b00000000, true); // Não mostra os dois pontos
+  }
+}
+
+// Função para lidar com a entrada de teclas do teclado matricial
+void handleKeypress(char key) {
+  static int inputIndex = 0;
+
+  if (key == '#') {
+    // Verifica se a senha digitada é correta
+    if (strcmp_P(inputPassword, correctPassword) == 0) {
+      paused = !paused; // Pausa ou retoma a contagem
+      if (!paused) {
+        previousMillis = millis(); // Reseta o temporizador ao retomar
+      }
+      Serial.println(paused ? "Contagem pausada" : "Contagem retomada");
+      noTone(BUZZER_PIN); // Desliga o buzzer
+      incorrectAttempts = 0; // Reseta tentativas incorretas
+      
+      // Exibe "BOMBA DESARMADA" no display OLED
+      bombaDesarmada = true; // Define a bomba como desarmada
+      display.clearDisplay();
+      display.setTextSize(2);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(10, 20);
+      display.print(F(" BOMBA    DESARMADA"));
+      display.display();
+      
+    } else {
+      // Lida com tentativas incorretas de senha
+      incorrectAttempts++;
+      if (incorrectAttempts == 1) {
+        Serial.println("Senha incorreta. Contagem reiniciada para 5.");
+        countdown = 500; // Reinicia o tempo para 5 segundos
+      } else if (incorrectAttempts == 2) {
+        Serial.println("Senha incorreta novamente. Tempo esgotado.");
+        countdown = 0; // Zera o tempo na segunda tentativa incorreta
+      }
+      previousMillis = millis(); // Atualiza o temporizador
+      updateBuzzer(countdown); // Atualiza o estado do buzzer
+    }
+    inputIndex = 0;
+    memset(inputPassword, 0, sizeof(inputPassword)); // Limpa a senha digitada
+  } else if (key == '*') {
+    // Limpa a senha digitada
+    inputIndex = 0;
+    memset(inputPassword, 0, sizeof(inputPassword));
+    Serial.println("Senha limpa");
+  } else {
+    // Armazena a tecla digitada na senha
+    if (inputIndex < sizeof(inputPassword) - 1) {
+      inputPassword[inputIndex++] = key;
+    }
+  }
+
+  Serial.print("Senha digitada: ");
+  Serial.println(inputPassword); // Exibe a senha digitada no monitor serial
+}
+
+// Função para atualizar o som do buzzer baseado no tempo restante
+void updateBuzzer(int time) {
+  if (time > 0) {
+    // Modula a frequência do buzzer de acordo com o tempo restante
+    int buzzerFrequency = map(time, 0, 9000, 300, 1000); // Mapeia o tempo para uma frequência
+    int modulatedFrequency = buzzerFrequency + 200 * sin(millis() / 100.0); // Modula a frequência
+    tone(BUZZER_PIN, modulatedFrequency); // Toca o som no buzzer
+  } else {
+    noTone(BUZZER_PIN); // Desliga o buzzer quando o tempo acaba
+  }
+}
+
+// Função principal de loop
+void loop() {
+  unsigned long currentMillis = millis();
+
+  if (!paused && currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    if (countdown > 0) {
+      countdown--; // Diminui o tempo a cada intervalo
+    }
+
+    updateDisplay(countdown); // Atualiza o display com o tempo restante
+    updateBuzzer(countdown); // Atualiza o buzzer com base no tempo restante
+
+    if (countdown <= 0) {
+      display.clearDisplay();
+      display.setTextSize(2);
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(10, 20);
+      display.print(F("KABUM!"));
+      display.setCursor(10, 40);
+      display.print(F("GAME OVER"));
+      display.display();
+    }
+  }
+
+  // Captura a tecla pressionada no teclado matricial
+  char key = keypad.getKey();
+  if (key) {
+    handleKeypress(key); // Trata a entrada do teclado
+  }
+
+  // Exibe a mensagem em código binário se o tempo não acabou e a bomba não está desarmada
+  static int offset = 0;
+  if (countdown > 0 && !bombaDesarmada) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(128 - offset, 24);
+    display.print(F("01010010 01001111 01000010 01001111 01010100 01001001 01000011 01000001 "));
+    display.display();
+    offset += 4; // Ajusta a velocidade da animação
+    if (offset > 128) offset = 0;
+    delay(50); // Ajusta o atraso da animação para corresponder ao intervalo
+  }
+}
